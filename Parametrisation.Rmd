@@ -1,0 +1,487 @@
+---
+title: "Paramtrisation of reaction norms for Aedes albopictus"
+author: "Dominic Brass (dombra@ceh.ac.uk)"
+date: "04/03/2024"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mgcv)
+library(ggplot2)
+library(tidymv)
+library(readxl)
+library(lme4)
+library(gamm4)
+library(voxel)
+library(devRate)
+library(tidyr)
+library(dplyr)
+library(investr)
+```
+
+## Data 
+
+We aim to fit reaction norms for life-history traits of Ae. albopictus for use in a mathematical model. The data we use for this is sourced from various laboratory studies investigating the effect of temperature and density on the life-history of Ae. albopictus. Although all studies we include find at least one of either temperature or density significant not all vary both variables simultaneously and no single study encompasses all the environmental conditions needed to parametrise a complete functional response. In the absence of standardised experimental procedures, and with the knowledge that life-history traits vary between populations, we consider the inclusion of two random effects in our models, region of population origin (Asia, Europe, America) and the type of food used for rearing juveniles (liver, TetraMin, shrimp, mouse pellets, brewers yeast, black solider fly powder). We fit reaction norms by fitting functional forms using a non-linear least squares (NLS) approach and using generalised additive mixed models (GAMMs) depending on the dimension of the desired reaction norm. The source for all the data used here is provided in the file Dens_Temp_WL.xlsx which is provided in the repository.
+
+We consider the following variables:
+
+* "Source" lists the main author of the paper the data is taken from. <br />
+* "Temperature" is the constant temperature at which the experiment was run. <br />
+* "Number_of_Larvae" is the number of larvae present at the start of the larval period. <br />
+* "Total_Food" is the total amount of food provided over the course of the larval period.  <br />
+* "Density" is the average mg of food supplied per larvae per day over the course of the larval period. <br />
+* "X_Dur", "XD_SE", "X_Surv", and "XS_SE" are the duration, standard error of the duration, through stage survival, and standard error of the through stage survival of life-stage "X". Life-stages considered are eggs ("E"), larvae ("L"), pupae ("P"), adults ("A"), and combined larval and pupal stages ("T"). <br />
+* "Body_Mass" is the body mass in (mg) of adults resulting from the listed experimental conditions, with associated standard error "B_M_SE".<br /> 
+* "Wing_Length" and "WL_SE" are the wing length of adults (mm) and the associated standard error.<br />
+* "AT_50" is the day at which half of all adults held at the experimental conditions died with standard error "AT_SE" and number of adults across all replicates "A_Numb". <br />
+* "Region" is the continent from which the population used for the experiment was taken. <br />
+* "Year" the year the population was taken from the field. <br />
+* "Food_Type" the food used for larval rearing.
+
+```{r cars, echo=FALSE}
+#Load data
+Dens_Temp_WL<- read_excel("Dens_Temp_WL.xlsx")
+
+#Set factors
+Dens_Temp_WL$Region <- as.factor(Dens_Temp_WL$Region)                     
+Dens_Temp_WL$Year <- as.factor(Dens_Temp_WL$Year)
+Dens_Temp_WL$Food_Type <- as.factor(Dens_Temp_WL$Food_Type)
+Dens_Temp_WL$Density <- log(Dens_Temp_WL$Density)
+ggplot2::theme_set(ggplot2::theme_bw())
+
+#Sets values for exploring model predictions
+Temp_Vals = seq(-10,40, length = 400)
+Dens_Vals = seq(-8,1, length = 400)
+
+head(Dens_Temp_WL)
+
+#Defines functions used for NLS fitting
+briere <- function(temp,aa,Tmin,Tmax,bb){
+  out = ifelse(temp > Tmax | temp < Tmin,0, aa * temp * (temp - Tmin) * (Tmax - temp)^(1 / bb))
+}
+
+gauss <- function(temp,aa,bb,cc){
+  out =  cc * (1/(aa*(2*pi)^0.5)) * exp(-0.5 * ((temp - bb)/aa) ^ 2)
+}
+
+quad <- function(temp,aa,bb,cc){
+  out = aa * temp ^ 2 + bb * temp + cc
+}
+
+
+```
+
+
+
+## Eggs
+
+We consider the life-history of active eggs (non-diapausing and non-quiescent), for which we wish to fit functional forms for stage duration ($\tau_E$) and through-stage survival ($P_E$).
+
+### Egg duration ($\tau_E$)
+
+Based on previous studies that fit the life-history of Aedes albopictus we trial Breire and quadratic functional forms to this parameter. As all egg trait data is sourced from Asian populations and eggs do not consume food there is no need to consider either random effect The best fitting functional form is a quadratic, which predicts a sensible relationship between stage duration and temperature. 
+
+```{r edur, echo=FALSE, warning = FALSE}
+
+EPD <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,E_Dur,ED_SE,Region) %>%
+  drop_na()
+
+
+EPD_dev <- data.frame(
+  temp = EPD$Temperature,
+  devRate = 1/(EPD$E_Dur),
+  ED_weight = EPD$ED_SE
+)
+
+EPD_dev <- EPD_dev[order(EPD_dev$temp),]
+
+EPD_mod_briere = nls(devRate ~  briere(temp,aa,Tmin,Tmax,bb), data = EPD_dev, start = list(aa = 0.0002,Tmin=2, Tmax = 40, bb = 1.1), weights = 1/EPD$ED_SE, control=nls.control(printEval=F, minFactor=2^-24, warnOnly=TRUE, maxiter=50))
+
+EPD_mod_quad = nls(devRate ~  quad(temp,aa,bb,cc), data = EPD_dev,weights = 1/EPD$ED_SE)
+
+EPD_new_dat <- data.frame(temp=seq(0, 40, by = 0.1))
+
+#summary(EPD_mod_briere)
+#summary(EPD_mod_quad)
+
+AIC(EPD_mod_briere,EPD_mod_quad)
+
+EPD_interval <- as_tibble(predFit(EPD_mod_quad, newdata = EPD_new_dat, interval = "confidence", level= 0.95)) %>%
+      mutate(temp = EPD_new_dat$temp)
+
+EPD_interval$fit = ifelse(EPD_interval$fit < 0 , 0, EPD_interval$fit)
+
+p1 <- ggplot(EPD_dev) +  geom_point(aes(x=temp, y=devRate),size=2, colour="black") + xlab("Temperature (°C)") +                 ylab(bquote('Development rate, ' * g[E]~' (1/Days)'))  
+
+p1+
+  geom_line(data=EPD_interval, aes(x = temp, y = fit )) + 
+  theme_bw() + theme(text = element_text(size = 20))
+
+```
+
+### Survival through the egg stage ($P_E$)
+
+We  follow the same procedure to predict the relationship between temperature and through egg-stage survival. We add two boundary conditions reflecting the known thermal limits on egg survival that are reported in the literature but not represented in experimental data ($P_E(0)=P_E(40)=0$). Due to the sparsity of the data we do not consider a random effect in this instance. We trial quadratic and Gaussian functional forms and find that the best fit is given by the Gaussian.
+
+```{r esurv_2, echo = FALSE, warning = FALSE}
+
+EPS <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,E_Surv,ES_SE,Region)  %>%
+  drop_na()
+
+EPS_dev <- data.frame(
+  temp = EPS$Temperature,
+  devRate = (EPS$E_Surv),
+  weight = EPS$ES_SE
+)
+
+EPS_dev <- EPS_dev[order(EPS_dev$temp),]
+
+EPS_mod_quad = nls(devRate ~  quad(temp,aa,bb,cc),data = EPS_dev,weights = 1/EPS$ES_SE)
+
+EPS_mod_gauss= nls(devRate ~  gauss(temp,aa,bb,cc), data = EPS_dev, start = list(aa = 12,bb=24, cc = 6.1),weights = 1/EPS$ES_SE)
+
+AIC(EPS_mod_gauss,EPS_mod_quad)
+EPS_new_dat <- data.frame(temp=seq(0, 40, by = 0.1))
+
+EPS_interval <- as_tibble(predFit(EPS_mod_gauss, newdata = EPS_new_dat, interval = "confidence", level= 0.95)) %>%
+      mutate(temp = EPS_new_dat$temp)
+
+EPS_interval$fit = ifelse(EPS_interval$fit < 0 , 0, EPS_interval$fit)
+
+p1 <- ggplot(EPS_dev) +  geom_point(aes(x=temp, y=devRate),size=2, colour="black") + xlab("Temperature (°C)") +                 ylab(bquote('Through stage survival,  ' * hat(S)[E]~' '))  
+
+p1+
+  geom_line(data=EPS_interval, aes(x = temp, y = fit )) + 
+  theme_bw() + 
+  theme_bw() + theme(text = element_text(size = 20))
+
+```
+
+## Pupae
+ 
+### Pupal stage duration ($\tau_P$)
+
+We trial the same functional forms we used previously when fitting models for development rate of eggs and find select a Briere functional form. 
+
+```{r pupfuncform, echo=FALSE, warning = FALSE}
+PPD <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,Density,P_Dur,PD_SE,Region,Year,Food_Type) %>%
+  drop_na()
+
+
+PPD_dev <- data.frame(
+  temp = PPD$Temperature,
+  devRate = 1/(PPD$P_Dur),
+  PD_weight = PPD$PD_SE
+)
+
+PPD_dev <- PPD_dev[order(PPD_dev$temp),]
+
+
+PPD_mod_briere = nls(devRate ~  briere(temp,aa,Tmin,Tmax,bb), start = list(aa = 0.0003,Tmin=8, Tmax = 44, bb = 2), algorithm = "port", data = PPD_dev)
+
+PPD_mod_quad = nls(devRate ~  quad(temp,aa,bb,cc),data = PPD_dev,weights = 1/PPD$PD_SE^2)
+
+PPD_mod_gauss= nls(devRate ~  gauss(temp,aa,bb,cc), data = PPD_dev,weights = 1/PPD$PD_SE^2, start = list(aa = 4,bb=25, cc = 1), algorithm = "port")
+
+#summary(PPD_mod_quad)
+#summary(PPD_mod_briere)
+#summary(PPD_mod_gauss)
+
+AIC(PPD_mod_quad,PPD_mod_briere,PPD_mod_gauss)
+
+PPD_new_dat <- data.frame(temp=seq(0, 40, by = 0.1))
+
+PPD_interval <- as_tibble(predFit(PPD_mod_briere, newdata = PPD_new_dat, interval = "confidence", level= 0.95)) %>%
+      mutate(temp = PPD_new_dat$temp)
+
+PPD_interval$fit = ifelse(PPD_interval$fit < 0 , 0, PPD_interval$fit)
+
+p1 <- ggplot(PPD_dev) +  geom_point(aes(x=temp, y=devRate),size=2, colour="black") + xlab("Temperature (°C)") +                 ylab(bquote('Development rate,  '*g[P]~'(1/Days)'))  
+
+p1+
+  geom_line(data=PPD_interval, aes(x = temp, y = fit )) + 
+  theme_bw() + theme(text = element_text(size = 20))
+
+```
+
+## Pupal Survival
+
+There is very little available pupal survival data available, and what is available is concentrated around a small range of temperatures optimal for development. We once again trial quadratic and Gaussian functional forms and select the quadratic functional form.
+
+```{r pupsurv2, echo=FALSE, warning = FALSE}
+
+PPS <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,P_Surv,Region,Food_Type,PS_SE) %>%
+  drop_na()
+
+PPS_dev <- data.frame(
+  temp = PPS$Temperature,
+  devRate = (PPS$P_Surv),
+    weight = (PPS$PS_SE)
+
+)
+
+PPS_dev <- PPS_dev[order(PPS_dev$temp),]
+
+PPS_mod_quad = nls(devRate ~  quad(temp,aa,bb,cc),data = PPS_dev,weights = 1/PPS_dev$weight)
+
+#PPS_mod_gauss= nls(devRate ~  gauss(temp,aa,bb,cc), data = PPS_dev, start = list(aa = 5e+00 ,bb=24, cc = 12 ), algorithm = "port")
+
+
+#summary(PPS_mod_quad)
+
+PPS_new_dat <- data.frame(temp=seq(0, 40, by = 0.1))
+
+PPS_interval <- as_tibble(predFit(PPS_mod_quad, newdata = PPS_new_dat, interval = "confidence", level= 0.95)) %>%
+      mutate(temp = PPS_new_dat$temp)
+
+PPS_interval$fit = ifelse(PPS_interval$fit < 0 , 0, PPS_interval$fit)
+
+p1 <- ggplot(PPS_dev) +  geom_point(aes(x=temp, y=devRate),size=2, colour="black") + xlab("Temperature (°C)") +                 ylab(bquote('Through stage survival, '*hat(S)[P]~' '))
+
+p1+
+  geom_line(data=PPS_interval, aes(x = temp, y = fit )) + 
+  theme_bw()  + theme(text = element_text(size = 20)) 
+
+
+```
+
+## Larvae
+
+### Survival
+
+We explore the relationship between through larval stage survival, temperature and food available per larva per day following the same procedure outlined for pupae. We fit three types of GAMMs, one dependent solely on temperature, one on density, and one that depends on both variables. The best model includes both density and temperature and no random effects and so this is the model we select.
+
+```{r larvsurv, echo = FALSE, warning=FALSE, message = FALSE}
+
+LPS <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,Density,L_Surv,Region, Food_Type) %>%
+  drop_na() %>%
+  mutate(Density = Density) 
+
+
+L_Surv_Mod_11 =gamm4(L_Surv ~ s(Temperature, m= 1, bs = "cr", k =6) , data = LPS)
+L_Surv_Mod_12 =gamm4(L_Surv ~ s(Temperature, m= 1, bs = "cr", k =6) , data = LPS, random = ~(1|Region))
+
+L_Surv_Mod_21 =gamm4(L_Surv ~ s(Density, m= 1, bs = "cr", k =6) , data = LPS)
+L_Surv_Mod_22 =gamm4(L_Surv ~ s(Density, m= 1, bs = "cr", k =6) , data = LPS, random =~(1|Region))
+L_Surv_Mod_23 =gamm4(L_Surv ~ s(Density, m= 1, bs = "cr", k =6) , data = LPS, random = ~(1+Density|Food_Type))
+L_Surv_Mod_24 =gamm4(L_Surv ~ s(Density, m= 1, bs = "cr", k =6) , data = LPS, random = ~(1+Density|Food_Type) + (1|Region))
+
+L_Surv_Mod_31 =gamm4(L_Surv ~ s(Temperature, bs = "cr", k =8)  +  s(Density, bs = "cr", k =8)  +s(Temperature,Density, m= 1, k =10, bs ="sos") , data = LPS)
+L_Surv_Mod_32 =gamm4(L_Surv ~ s(Temperature, bs = "cr", k =8)  +  s(Density, bs = "cr", k =8)  +s(Temperature,Density, m= 1, k =10, bs ="sos") , data = LPS, random = ~(1+Density|Food_Type))
+L_Surv_Mod_33 =gamm4(L_Surv ~ s(Temperature, bs = "cr", k =8)  +  s(Density, bs = "cr", k =8)  +s(Temperature,Density, m= 1, k =10, bs ="sos") , data = LPS, random = ~(1|Region))
+L_Surv_Mod_34 =gamm4(L_Surv ~ s(Temperature, bs = "cr", k =8)  +  s(Density, bs = "cr", k =8)  +s(Temperature,Density, m= 1, k =10, bs ="sos") , data = LPS, random = ~(1|Region) + (1+Density|Food_Type))
+
+AIC(L_Surv_Mod_11$mer,L_Surv_Mod_12$mer,
+    L_Surv_Mod_21$mer,L_Surv_Mod_22$mer,L_Surv_Mod_23$mer,L_Surv_Mod_24$mer,
+    L_Surv_Mod_31$mer,L_Surv_Mod_32$mer,L_Surv_Mod_33$mer,L_Surv_Mod_34$mer)
+
+
+summary(L_Surv_Mod_31$gam)
+
+model_ls_3 <- predict_gam(L_Surv_Mod_31$gam, values=data.frame(Density = Dens_Vals,Temperature = Temp_Vals))
+model_ls_3$fit = ifelse(model_ls_3$fit < 0,0,model_ls_3$fit)
+model_ls_3$fit = ifelse(model_ls_3$fit > 1,1,model_ls_3$fit)
+model_ls_3$fit = ifelse(model_ls_3$Temperature < 0,0,model_ls_3$fit)
+
+
+```
+
+The relationship predicted by the GAM is broadly sensible, showing that there is a thermal optimum for larval survival at around 25 degrees and that high larval densities reduce survival. The slight reduction in larval survival at high food per larvae per day is likely due to a combination of sparse data in this region and that the experiments we draw data from not controlling for the effects of larval density independently of food amount.
+
+```{r larvsurvplot, echo = FALSE, warning=FALSE, message = FALSE}
+
+lsg_3 <- ggplot(model_ls_3,aes(Density, Temperature, z = fit)) +
+  geom_raster(aes(fill = fit)) +
+  scale_fill_continuous(name = expression(atop('Through \nlarval-stage\nsurvival,',paste(''*hat(S[L])~''))), type = "viridis")+ guides( label.hjust = 1) +
+  theme_minimal() +
+  theme(legend.position = "right") + xlab("log(Food per larva per day), (mg/larvae/day)") + ylab(bquote('Temperature, (°C)')) + 
+  ylim(0,39)+ theme(text = element_text(size = 18),legend.text.align = 0)  
+
+
+lsg_3
+gam.check(L_Surv_Mod_31$gam)
+
+```
+
+### Stage duration
+
+We follow the same procedure to parametrise the reaction norm for larval stage duration as we did for larval survival trialling three different GAMMs in various combinations. The best model includes temperature, density and both random effects.
+
+```{r larvdur2, echo = FALSE, warning=FALSE, message = FALSE}
+
+ LPD <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,Density,L_Dur,Food_Type,Region) %>%
+  drop_na()  %>%
+   mutate(Density = Density) %>%
+   mutate(L_Dur = 1/L_Dur)
+
+L_Dur_Mod_11 =gamm4(L_Dur ~ s(Temperature, bs = "cr", m =1, k = 6), data = LPD )
+L_Dur_Mod_12 =gamm4(L_Dur ~ s(Temperature, bs = "cr", m =1, k = 6), data = LPD, random = ~(1|Region) )
+
+L_Dur_Mod_21 =gamm4(L_Dur ~ s(Density, bs = "cr", m =1, k = 6)  , data = LPD)
+L_Dur_Mod_22 =gamm4(L_Dur ~ s(Density, bs = "cr", m =1, k = 6)  , data = LPD, random = ~ (1|Region))
+L_Dur_Mod_23 =gamm4(L_Dur ~ s(Density, bs = "cr", m =1, k = 6)  , data = LPD, random = ~(1+Density|Food_Type))
+L_Dur_Mod_24 =gamm4(L_Dur ~ s(Density, bs = "cr", m =1, k = 6)  , data = LPD, random = ~(1+Density|Food_Type) + (1|Region))
+
+L_Dur_Mod_31 =gamm4(L_Dur ~   s(Density, bs = "cc", m =1, k =4)+ s(Temperature,  m =1, k =4, bs = "cc") + s(Temperature, Density,m= 1, k =20), data = LPD)
+L_Dur_Mod_32 =gamm4(L_Dur ~   s(Density, bs = "cc", m =1, k =4)+ s(Temperature,  m =1, k =4, bs = "cc") + s(Temperature, Density,m= 1, k =20), data = LPD, random = ~ (1|Region))
+L_Dur_Mod_33 =gamm4(L_Dur ~   s(Density, bs = "cc", m =1, k =4)+ s(Temperature,  m =1, k =4, bs = "cc") + s(Temperature, Density,m= 1, k =20), data = LPD, random = ~(1+Density|Food_Type))
+L_Dur_Mod_34 =gamm4(L_Dur ~   s(Density, bs = "cc", m =1, k =4)+ s(Temperature,  m =1, k =4, bs = "cc") + s(Temperature, Density,m= 1, k =20), data = LPD, random = ~(1+Density|Food_Type) + (1|Region))
+
+
+AIC(L_Dur_Mod_11$mer,L_Dur_Mod_12$mer,
+    L_Dur_Mod_21$mer,L_Dur_Mod_22$mer,L_Dur_Mod_23$mer,L_Dur_Mod_24$mer,
+    L_Dur_Mod_31$mer,L_Dur_Mod_32$mer,L_Dur_Mod_33$mer,L_Dur_Mod_34$mer)
+
+summary(L_Dur_Mod_34$gam)  
+```
+
+```{r larvdur1, echo = FALSE, warning=FALSE, message = FALSE}
+
+
+Temp_Vals_L = seq(10,30, length = 400)
+
+model_ld_3 <- predict_gam(L_Dur_Mod_34$gam, values=data.frame(Density = Dens_Vals,Temperature = Temp_Vals_L))
+model_ld_3$Density = (model_ld_3$Density)
+model_ld_3$fit = model_ld_3$fit
+
+ldg_3 <- ggplot(model_ld_3,aes(Density, Temperature, z = fit)) +
+  geom_raster(aes(fill = fit)) +
+  scale_fill_continuous(name = "y") +
+  theme_minimal() +
+  scale_fill_continuous(expression(atop('Development',paste('rate,  '*g[L]~''))), type = "viridis") +
+  theme_minimal() +
+  theme(legend.title.align = 0.5,text = element_text(size = 16)) +     xlab("log(Food per larvae per day), (mg/larvae/day)") + ylab(bquote('Temperature (°C)')) + 
+  ylim(12,30)+
+  xlim(-6,1) + theme(text = element_text(size = 18)) 
+
+
+ldg_3
+
+gam.check(L_Dur_Mod_34$gam)
+model_ld <- model_ld_3
+model_ld$fit = 1/model_ld_3$fit
+
+```
+
+## Adult wing length
+
+The literature predicts that larval temperature and food available per larvae per day predict adult wing length and from the pairs plot we see that this is plausible. We fit GAMMs relating wing length to  temperature and density and find that the best fit is a model that includes both variables and food type as a random effect.
+
+```{r wl_add, echo = FALSE, warning=FALSE, message = FALSE}
+
+Wing_Parms <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,Density,Wing_Length,WL_SE,Food_Type,Region) %>%
+  drop_na() %>%
+  filter(Food_Type != "shrimp")
+
+fit_W_11 <- gamm4(Wing_Length ~ s(Temperature, m =1, bs = "cr", k = 4)  ,data = Wing_Parms)
+fit_W_12 <- gamm4(Wing_Length ~ s(Temperature, m =1, bs = "cr", k = 4)  ,data = Wing_Parms, random = ~(1|Region))
+
+fit_W_21 <- gamm4(Wing_Length ~ s(Density, m =1, bs = "cr", k = 4)  ,data = Wing_Parms)
+fit_W_22 <- gamm4(Wing_Length ~ s(Density, m =1, bs = "cr", k = 4)  ,data = Wing_Parms, random = ~(1|Region) + (1+Density|Food_Type))
+fit_W_23 <- gamm4(Wing_Length ~ s(Density, m =1, bs = "cr", k = 4)  ,data = Wing_Parms, random = ~(1|Region) + (1+Density|Food_Type))
+fit_W_24 <- gamm4(Wing_Length ~ s(Density, m =1, bs = "cr", k = 4)  ,data = Wing_Parms, random = ~(1|Region) + (1+Density|Food_Type))
+
+fit_W_31 <- gamm4(Wing_Length ~s(Density, m =1, k = 4, bs = "cr") + s(Temperature, m =1, k = 4, bs = "cr")  + s(Density,Temperature, m =1, k = 8, bs = "sos") ,data = Wing_Parms)
+fit_W_32 <- gamm4(Wing_Length ~s(Density, m =1, k = 4, bs = "cr") + s(Temperature, m =1, k = 4, bs = "cr")  + s(Density,Temperature, m =1, k = 12) ,data = Wing_Parms, random = ~(1|Food_Type))
+fit_W_33 <- gamm4(Wing_Length ~s(Density, m =1, k = 4, bs = "cr") + s(Temperature, m =1, k = 4, bs = "cr") +s(Density,Temperature, m =1, k = 12)    ,data = Wing_Parms, random = ~(1+Density|Food_Type))
+fit_W_34 <- gamm4(Wing_Length ~s(Density, m =1, k = 4, bs = "cr") + s(Temperature, m =1, k = 4, bs = "cr") +s(Density,Temperature, m =1, k = 12)   ,data = Wing_Parms, random = ~(1+Density|Food_Type) + (1|Region))
+
+
+AIC(fit_W_11$mer,fit_W_12$mer,
+    fit_W_21$mer,fit_W_22$mer,fit_W_23$mer,fit_W_24$mer,
+    fit_W_31$mer,fit_W_32$mer,fit_W_33$mer,fit_W_34$mer
+    )
+
+summary(fit_W_33$gam)
+
+Temp_Vals_W = seq(15,30, length = 400)
+Dens_Vals_W = seq(-8,1, length = 400)
+
+model_wl_3 <- predict_gam(fit_W_33$gam, values = data.frame(Temperature = Temp_Vals_W, Density =  Dens_Vals_W))
+model_wl_3$Density = (model_wl_3$Density)
+model_wl_3$fit = ifelse(model_wl_3$fit <0 , 0 , model_wl_3$fit)
+model_wl_3$fit = ifelse(model_wl_3$fit > 4 , 4 , model_wl_3$fit)
+
+wlg_3 <- ggplot(model_wl_3,aes(Density, Temperature, z = fit)) +
+          geom_raster(aes(fill = fit)) +
+          scale_fill_continuous(name = 'Adult wing\nlength (mm)', type = "viridis") +
+          theme_minimal() +
+          theme(legend.position = "right",legend.title.align=0.0) + 
+          xlab("log(Food per larva per day) (mg/larvae/day)") + ylab(bquote('Average temperature \nduring development (°C)'))   + theme(text = element_text(size = 18)) 
+
+gam.check(fit_W_33$gam)
+
+wlg_3
+
+```
+
+The relationship shows large individuals arise from low temperatures and low densities. This broadly makes sense as when temperatures are low larval stage duration is longer, giving individuals more time to acquire nutrients which are plentiful at low densities. At high larval densities individuals do not acquire sufficient reserves to pupate successfully and those that do are smaller. Fast larval development times such as occur when larval density is low and temperature is around $25$ degrees mean that individuals have less time to develop and are therefore smaller despite the more favorable conditions. 
+
+
+##Adult longeivity
+
+We fit GAMMs relating wing length to  temperature and density and find that the best fit is a model that includes both variables and region as a random effect.
+
+
+```{r a50_2, echo = FALSE, warning=FALSE, message = FALSE}
+
+
+AMP <- Dens_Temp_WL %>%
+  dplyr::select(Temperature,Wing_Length,AT_50,Region, A_Numb) %>%
+  drop_na() 
+
+
+A_Mort_11 <- gamm4(AT_50 ~    s(Wing_Length, m= 1, bs = "cr", k = 4)  ,data = AMP)
+A_Mort_12 <- gamm4(AT_50 ~    s(Wing_Length, m= 1, bs = "cr", k = 4)  ,data = AMP, random = ~(1|Region))
+
+A_Mort_21 <- gamm4(AT_50 ~    s(Temperature, m= 1, bs = "cr", k = 4)  ,data = AMP)
+A_Mort_22 <- gamm4(AT_50 ~    s(Temperature, m= 1, bs = "cr", k = 4)  ,data = AMP, random = ~(1|Region))
+
+A_Mort_31 <- gamm4(AT_50 ~ s(Temperature, m= 1, bs = "cr", k =9) +s(Wing_Length, m= 1, bs = "cr", k =9 ) +s(Temperature,Wing_Length, m= 1, k = 6),data = AMP)
+A_Mort_32 <- gamm4(AT_50 ~ s(Temperature, m= 1, bs = "cr", k =9) +s(Wing_Length, m= 1, bs = "cr", k =9 ) +s(Temperature,Wing_Length, m= 1, k = 6),data = AMP, random = ~(1|Region))
+
+AIC(fit_W_11$mer,fit_W_12$mer,
+    fit_W_21$mer,fit_W_22$mer,
+    fit_W_31$mer,fit_W_32$mer
+    )
+
+summary(A_Mort_32$gam)
+gam.check(A_Mort_32$gam)
+
+Wing_Vals = seq(1.6,3.5,length = length(Temp_Vals))
+model_am <- predict_gam(A_Mort_32$gam, values = data.frame(Temperature = Temp_Vals, Wing_Length = Wing_Vals))
+model_am$fit <- ifelse(model_am$fit < 0.183,0.183,model_am$fit)
+model_am$fit <- ifelse(model_am$Wing_Length < 1.6,0.183,model_am$fit)
+
+
+ggplot(model_am,aes(Wing_Length, Temperature, z = fit)) +
+  geom_raster(aes(fill = fit)) +
+  scale_fill_continuous(name = 'Time until \n50% mortality \n(Days)', type = "viridis") +
+  theme_minimal() +
+  theme(text = element_text(size = 18),legend.position = "right",legend.title.align=0.0) + xlab("Adult wing length (mm)") + ylab(bquote('Temperature (°C)'))  
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
